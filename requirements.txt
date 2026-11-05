@@ -1,0 +1,6 @@
+psycopg2-binary>=2.9
+PyYAML>=6.0
+pandas>=2.0
+matplotlib>=3.7
+statsmodels>=0.14
+pytest>=7.0

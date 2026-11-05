@@ -1,0 +1,34 @@
+# Pipeline configuration. Every value can be overridden with an environment variable
+# (shown in brackets), which is how Docker and CI pass settings.
+
+database:
+  url: postgresql://localhost/fuel_dw          # [DATABASE_URL]
+  schema: fuel_dw
+
+sources:
+  # Daily files published every morning by the Ministry of Enterprises (MIMIT), licence IODL 2.0
+  mimit_daily_prices: https://www.mimit.gov.it/images/exportCSV/prezzo_alle_8.csv
+  mimit_daily_registry: https://www.mimit.gov.it/images/exportCSV/anagrafica_impianti_attivi.csv
+  # Quarterly archives (one CSV per day). Default: mirror of the MIMIT files in this repo's release.
+  archive_url_template: https://github.com/Amirhatamian/italy-fuel-etl/releases/download/data-v1/{year}_{quarter}_tr.tar.gz   # [ARCHIVE_URL_TEMPLATE]
+  # European Central Bank: daily reference rate USD per EUR
+  ecb_eurusd: https://data-api.ecb.europa.eu/service/data/EXR/D.USD.EUR.SP00.A?format=csvdata&startPeriod={start}&endPeriod={end}
+  # Brent crude, USD per barrel (EIA data via the datasets/oil-prices project)
+  brent_daily: https://raw.githubusercontent.com/datasets/oil-prices/main/data/brent-daily.csv
+
+paths:
+  download_dir: data/downloads                 # [DOWNLOAD_DIR]
+
+validation:
+  # Hard limits: rows outside them are quarantined (not loaded).
+  min_price_eur: 0.10
+  max_price_eur: 5.00
+  # Volume check: warn when a day's row count differs from the previous day by more than this share.
+  max_daily_row_change: 0.20
+
+marts:
+  # Business rules used by the analysis views (not by the load).
+  max_price_age_days: 14          # a price not confirmed for longer is treated as stale
+  outlier_low: 0.90               # below 90% of the day's national self-service median = suspicious
+  outlier_high: 1.40
+  litres_per_barrel: 158.987
