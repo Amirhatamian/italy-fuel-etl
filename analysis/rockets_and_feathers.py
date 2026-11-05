@@ -8,6 +8,8 @@ FALLS of crude oil (Brent, in euro per litre) over the same day and the previous
 
 Σβ⁺ = share of a crude price RISE passed to the pump within 15 days; Σβ⁻ = the same for a FALL.
 Standard errors: Newey–West (HAC, 7 lags), because daily changes are autocorrelated.
+Days with a pump change above 6 cents (one-off steps, likely excise duty changes) are left out
+of the main model; the results with all days are reported as a robustness check.
 
 Usage:  python analysis/rockets_and_feathers.py      (DATABASE_URL as for the pipeline)
 Output: figures/*.png, analysis/results.md
@@ -22,6 +24,8 @@ import psycopg2
 import statsmodels.api as sm
 
 LAGS = 14
+EARLY = 5     # also compare what is passed on within the first 5 days (speed)
+STEP = 0.06   # a one-day pump change above 6 cents is a one-off step (likely a tax change), not a market move
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIG = ROOT / "figures"
 FIG.mkdir(exist_ok=True)
@@ -46,18 +50,26 @@ ax.plot(wide.index, wide["Diesel"], color=BLUE, label="Diesel, self-service (nat
 ax.plot(brent.index, brent, color=GREY, label="Crude oil (Brent) per litre")
 ax.fill_between(wide.index, brent, wide["Petrol"], color=ACCENT, alpha=0.06)
 mid = wide.index[len(wide) // 2]
-ax.annotate("taxes + refining + distribution + margin", xy=(mid, (brent[mid] + wide["Petrol"][mid]) / 2),
-            ha="center", color="#555555", fontsize=9)
+ax.annotate("taxes + refining + distribution + margin", xy=(mid, 1.05), ha="center", color="#555555", fontsize=9)
 ax.set_ylabel("€ per litre")
-ax.set_ylim(0, None)
+ax.set_ylim(0, 2.5)
 ax.legend(loc="lower left", frameon=False, fontsize=9)
-ax.set_title("Crude oil is about a third of the pump price; the rest barely moves", loc="left", fontweight="bold")
+steps = [d for d in wide.index if (wide.loc[:, ["Petrol", "Diesel"]].diff().abs().loc[d] > STEP).any()]
+for d in steps:
+    ax.axvline(d, color="#555555", linestyle=":", linewidth=1)
+if steps:
+    ax.annotate("dotted lines: one-day steps > 6 cents (not explained by crude oil)", xy=(wide.index[0], 2.42),
+                fontsize=8, color="#555555")
+ax.set_title("Crude oil is about a quarter of the pump price; sudden steps come from elsewhere",
+             loc="left", fontweight="bold")
 fig.tight_layout()
 fig.savefig(FIG / "pump_vs_crude.png", dpi=150)
 
 # ------------------------------------------------------------------ regression
-def asymmetry(fuel: str):
+def asymmetry(fuel: str, exclude_steps: bool = True):
     d = pd.DataFrame({"dp": wide[fuel].diff(), "db": brent.diff()})
+    if exclude_steps:
+        d.loc[d["dp"].abs() > STEP, "dp"] = np.nan
     X = {}
     for k in range(LAGS + 1):
         X[f"up_{k}"] = d["db"].clip(lower=0).shift(k)
@@ -74,8 +86,15 @@ def asymmetry(fuel: str):
     for c in down:
         r[names.index(c)] = -1
     test = model.t_test(r)
+    r_early = np.zeros(len(model.params))
+    for k in range(EARLY + 1):
+        r_early[names.index(f"up_{k}")] = 1
+        r_early[names.index(f"down_{k}")] = -1
+    test_early = model.t_test(r_early)
     return {
-        "fuel": fuel, "days": int(model.nobs),
+        "early_rise": model.params[up[:EARLY + 1]].sum(), "early_fall": model.params[down[:EARLY + 1]].sum(),
+        "early_difference": float(test_early.effect[0]), "early_p_value": float(test_early.pvalue),
+        "fuel": fuel, "days": int(model.nobs), "steps_excluded": exclude_steps,
         "pass_through_rise": model.params[up].sum(), "pass_through_fall": model.params[down].sum(),
         "difference": float(test.effect[0]), "p_value": float(test.pvalue),
         "cum_rise": model.params[up].cumsum().values, "cum_fall": model.params[down].cumsum().values,
@@ -83,6 +102,7 @@ def asymmetry(fuel: str):
 
 
 results = [asymmetry("Petrol"), asymmetry("Diesel")]
+robust = [asymmetry("Petrol", False), asymmetry("Diesel", False)]
 
 # ------------------------------------------------------------------ chart 2: response curves
 fig, axes = plt.subplots(1, 2, figsize=(11, 4), sharey=True)
@@ -119,15 +139,22 @@ fig.tight_layout()
 fig.savefig(FIG / "pipeline_monitoring.png", dpi=150)
 
 # ------------------------------------------------------------------ results file
-lines = ["| Fuel | Days | Passed on within 15 days: crude RISE | crude FALL | Difference | p-value |",
-         "|---|---|---|---|---|---|"]
-for r in results:
-    lines.append(f"| {r['fuel']} | {r['days']} | {100 * r['pass_through_rise']:.0f}% | {100 * r['pass_through_fall']:.0f}% "
-                 f"| {100 * r['difference']:+.0f} points | {r['p_value']:.3f} |")
+lines = ["| Fuel | Days used | Within 6 days: RISE | FALL | p-value | Within 15 days: RISE | FALL | p-value |",
+         "|---|---|---|---|---|---|---|---|"]
+for r in results + robust:
+    label = r["fuel"] if r["steps_excluded"] else r["fuel"] + " (all days, incl. steps)"
+    lines.append(f"| {label} | {r['days']} | {100 * r['early_rise']:.0f}% | {100 * r['early_fall']:.0f}% "
+                 f"| {r['early_p_value']:.3f} | {100 * r['pass_through_rise']:.0f}% | {100 * r['pass_through_fall']:.0f}% "
+                 f"| {r['p_value']:.3f} |")
 summary = wide.agg(["mean", "min", "max"]).round(3)
 lines += ["", "Average self-service price over the period (€/litre):", "",
           summary.to_markdown() if hasattr(summary, "to_markdown") else summary.to_string()]
 share = (brent / wide["Petrol"]).mean()
+lines += ["", "One-day steps above 6 cents (excluded from the main model):"]
+chg = wide[["Petrol", "Diesel"]].diff()
+for d in steps:
+    lines.append(f"- {d:%Y-%m-%d}: petrol {100 * chg.loc[d, 'Petrol']:+.1f} c, diesel {100 * chg.loc[d, 'Diesel']:+.1f} c, "
+                 f"crude {100 * brent.diff().loc[d]:+.1f} c per litre")
 lines += ["", f"Crude oil as share of the petrol price (average): {100 * share:.0f}%",
           f"Brent per litre: min €{brent.min():.3f}, max €{brent.max():.3f}"]
 (ROOT / "analysis" / "results.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
